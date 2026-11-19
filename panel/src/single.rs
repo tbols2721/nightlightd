@@ -41,16 +41,37 @@ trait Panel {
 /// already running, in which case that one is asked to raise itself and this
 /// process should exit. `focus` is set (on the owner) whenever `Present` is
 /// called; the egui loop clears it and focuses the window.
+///
+/// Errors when the session bus cannot be reached, or when another panel holds
+/// the name and cannot be asked to come forward.
 pub fn acquire(focus: Arc<AtomicBool>) -> zbus::Result<Option<Connection>> {
     let connection = Builder::session()?
         .serve_at(PATH, Presenter { focus })?
         .build()?;
+    if claim(&connection)? {
+        return Ok(Some(connection));
+    }
+    // Someone holds the name. If they cannot be reached, they let go of it
+    // between our request and our call — a panel closed a moment before this
+    // one opened — so the name is most likely free now: ask once more.
+    if PanelProxyBlocking::new(&connection)?.present().is_ok() {
+        return Ok(None);
+    }
+    if claim(&connection)? {
+        return Ok(Some(connection));
+    }
+    // Taken again in that instant: a different panel won the race. Raise it,
+    // and this time a failure is a real one.
+    PanelProxyBlocking::new(&connection)?.present()?;
+    Ok(None)
+}
+
+/// Asks for the panel name once, without queueing. `Ok(true)` means it is
+/// ours; `Ok(false)` means another panel holds it.
+fn claim(connection: &Connection) -> zbus::Result<bool> {
     match connection.request_name_with_flags(NAME, RequestNameFlags::DoNotQueue.into()) {
-        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => Ok(Some(connection)),
-        Ok(RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => {
-            PanelProxyBlocking::new(&connection)?.present()?;
-            Ok(None)
-        }
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => Ok(true),
+        Ok(RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => Ok(false),
         Ok(RequestNameReply::InQueue) => Err(zbus::Error::Failure(
             "unexpectedly queued for the panel bus name".into(),
         )),

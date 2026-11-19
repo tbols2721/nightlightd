@@ -251,7 +251,10 @@ struct Panel {
     tray_icon: TrayIcon,
     /// The demo clock, set by `--demo` and otherwise absent. Its presence is
     /// the only thing that makes this window synthesise a day rather than
-    /// read one, and it is what mutes every write.
+    /// read one. It also guards the panel's own side effects, which never go
+    /// near the daemon — the remembered theme and tray icon, autostart,
+    /// starting the daemon. Writes to the daemon are dropped by
+    /// [`Client::demo`] instead.
     demo: Option<Instant>,
     /// How far through the scripted tour we have got.
     demo_cursor: usize,

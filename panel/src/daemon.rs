@@ -90,17 +90,27 @@ trait Daemon {
     fn get_outputs(&self) -> zbus::Result<Vec<(u32, u16)>>;
 }
 
-/// Demo clients have no proxy to the live daemon.
+/// The panel's handle to the daemon. A live client talks to it over the
+/// session bus; a demo client (`live` is `None`) talks to nothing, so every
+/// write is dropped and every read reports the daemon unreachable.
 pub struct Client {
     live: Option<Session>,
 }
 
+/// The live half of a [`Client`]: two proxies on the panel's bus connection.
 struct Session {
+    /// The daemon itself.
     proxy: DaemonProxyBlocking<'static>,
+    /// The bus's own interface, for one question: does anything own the
+    /// daemon's name (#42)?
     bus: zbus::blocking::fdo::DBusProxy<'static>,
 }
 
 impl Client {
+    /// Builds the proxies on the panel's existing session-bus connection.
+    /// Succeeds even when the daemon is not running — the bus is what must
+    /// exist; calls then fail per-request and are reported as `None` /
+    /// swallowed.
     pub fn connect(connection: &Connection) -> zbus::Result<Self> {
         Ok(Self {
             live: Some(Session {
@@ -110,10 +120,17 @@ impl Client {
         })
     }
 
+    /// A client for `--demo`, connected to nothing. A demo run is a
+    /// recording, not a session: its scripted tour drags the curve and moves
+    /// the bounds, and must not rewrite the settings of whoever records it.
     pub fn demo() -> Self {
         Self { live: None }
     }
 
+    /// Every write to the daemon goes through here, so a demo client drops
+    /// all of them in one place rather than at a dozen call sites, one of
+    /// which would eventually be missed. Errors (a stopped daemon) are
+    /// swallowed: a write must never crash the panel.
     fn send(&self, request: impl FnOnce(&DaemonProxyBlocking<'_>) -> zbus::Result<()>) {
         if let Some(session) = &self.live {
             let _ = request(&session.proxy);

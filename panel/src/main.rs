@@ -1258,6 +1258,9 @@ impl Panel {
     /// A thin client cannot be the daemon, but it can ask for one — the same
     /// bargain the tray struck in #43.
     fn spawn_daemon(&mut self, args: &[&str], fall_back: bool) {
+        if self.demo.is_some() {
+            return;
+        }
         let unit = std::process::Command::new("systemctl").args(args).status();
         if fall_back && !unit.is_ok_and(|status| status.success()) {
             let _ = std::process::Command::new(sibling("nightlightd"))
@@ -1621,11 +1624,15 @@ impl Panel {
         });
         if let Some(index) = chosen {
             self.theme_index = index;
-            remember_theme(index);
+            if self.demo.is_none() {
+                remember_theme(index);
+            }
         }
         if let Some(icon) = chosen_icon {
             self.tray_icon = icon;
-            remember_tray_icon(icon);
+            if self.demo.is_none() {
+                remember_tray_icon(icon);
+            }
         }
 
         // The two switches share a card and a row. They are the only things
@@ -1673,8 +1680,10 @@ impl Panel {
                 });
                 if toggled {
                     self.start_at_login = login;
-                    autostart::set(self.start_at_login);
-                    self.start_at_login = autostart::enabled();
+                    if self.demo.is_none() {
+                        autostart::set(login);
+                        self.start_at_login = autostart::enabled();
+                    }
                 }
             });
         });
@@ -2480,24 +2489,25 @@ fn main() -> eframe::Result<()> {
     // Single instance: if a panel is already open, ask it to come forward and
     // exit instead of opening a second window.
     let focus = Arc::new(AtomicBool::new(false));
-    let _lock = match single::acquire(Arc::clone(&focus)) {
-        Some(connection) => connection,
-        None => return Ok(()),
-    };
-
-    let mut client = match Client::connect() {
-        Ok(client) => client,
+    let connection = match single::acquire(Arc::clone(&focus)) {
+        Ok(Some(connection)) => connection,
+        Ok(None) => return Ok(()),
         Err(error) => {
-            eprintln!("nightlight-panel: cannot reach the session bus: {error}");
+            eprintln!(
+                "nightlight-panel: cannot start or present the panel on the session bus: {error}"
+            );
             std::process::exit(1);
         }
     };
-    // A reel must not touch the settings of whoever is recording it. Muted at
-    // the door rather than checked at each send, so no future write can
-    // forget to ask.
-    if args.demo {
-        client.mute();
-    }
+
+    let client = if args.demo {
+        Client::demo()
+    } else {
+        Client::connect(&connection).unwrap_or_else(|error| {
+            eprintln!("nightlight-panel: cannot initialize the daemon client: {error}");
+            std::process::exit(1);
+        })
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -2534,7 +2544,7 @@ fn main() -> eframe::Result<()> {
                 night_dim: 1.0,
                 orig_gamma: 1.0,
                 orig_night_dim: 1.0,
-                start_at_login: autostart::enabled(),
+                start_at_login: !args.demo && autostart::enabled(),
                 offset: LocalOffset::new(unix_secs(), read_utc_offset()),
                 focus: Arc::clone(&focus),
                 status: None,

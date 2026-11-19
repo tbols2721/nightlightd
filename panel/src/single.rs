@@ -41,21 +41,19 @@ trait Panel {
 /// already running, in which case that one is asked to raise itself and this
 /// process should exit. `focus` is set (on the owner) whenever `Present` is
 /// called; the egui loop clears it and focuses the window.
-pub fn acquire(focus: Arc<AtomicBool>) -> Option<Connection> {
-    let connection = Builder::session()
-        .ok()?
-        .serve_at(PATH, Presenter { focus })
-        .ok()?
-        .build()
-        .ok()?;
+pub fn acquire(focus: Arc<AtomicBool>) -> zbus::Result<Option<Connection>> {
+    let connection = Builder::session()?
+        .serve_at(PATH, Presenter { focus })?
+        .build()?;
     match connection.request_name_with_flags(NAME, RequestNameFlags::DoNotQueue.into()) {
-        Ok(RequestNameReply::PrimaryOwner) => Some(connection),
-        _ => {
-            // Another panel owns the name: ask it to come forward, then bow out.
-            if let Ok(proxy) = PanelProxyBlocking::new(&connection) {
-                let _ = proxy.present();
-            }
-            None
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => Ok(Some(connection)),
+        Ok(RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => {
+            PanelProxyBlocking::new(&connection)?.present()?;
+            Ok(None)
         }
+        Ok(RequestNameReply::InQueue) => Err(zbus::Error::Failure(
+            "unexpectedly queued for the panel bus name".into(),
+        )),
+        Err(error) => Err(error),
     }
 }

@@ -90,39 +90,34 @@ trait Daemon {
     fn get_outputs(&self) -> zbus::Result<Vec<(u32, u16)>>;
 }
 
-/// A live handle to the daemon: the session-bus connection plus a proxy.
+/// Demo clients have no proxy to the live daemon.
 pub struct Client {
+    live: Option<Session>,
+}
+
+struct Session {
     proxy: DaemonProxyBlocking<'static>,
-    /// The bus's own interface, for one question: does anything own the
-    /// daemon's name (#42)?
-    fdo: zbus::blocking::fdo::DBusProxy<'static>,
-    /// Whether writes are swallowed at the door. A demo run is a recording,
-    /// not a session: its scripted tour drags the curve and changes the
-    /// bounds, and without this the reel would rewrite the config of whoever
-    /// is recording it. Gated here rather than at each call site because
-    /// there are a dozen of those and one of them would eventually be missed.
-    muted: bool,
+    bus: zbus::blocking::fdo::DBusProxy<'static>,
 }
 
 impl Client {
-    /// Connects to the session bus and builds the proxy. Succeeds even when the
-    /// daemon is not running — the bus is what must exist; calls then fail
-    /// per-request and are reported as `None` / swallowed.
-    pub fn connect() -> zbus::Result<Self> {
-        let connection = Connection::session()?;
-        let proxy = DaemonProxyBlocking::new(&connection)?;
-        let fdo = zbus::blocking::fdo::DBusProxy::new(&connection)?;
+    pub fn connect(connection: &Connection) -> zbus::Result<Self> {
         Ok(Self {
-            proxy,
-            fdo,
-            muted: false,
+            live: Some(Session {
+                proxy: DaemonProxyBlocking::new(connection)?,
+                bus: zbus::blocking::fdo::DBusProxy::new(connection)?,
+            }),
         })
     }
 
-    /// Stops every write reaching the daemon, for the length of the process.
-    /// One-way on purpose: a demo run has no business un-muting itself.
-    pub fn mute(&mut self) {
-        self.muted = true;
+    pub fn demo() -> Self {
+        Self { live: None }
+    }
+
+    fn send(&self, request: impl FnOnce(&DaemonProxyBlocking<'_>) -> zbus::Result<()>) {
+        if let Some(session) = &self.live {
+            let _ = request(&session.proxy);
+        }
     }
 
     /// Whether something owns the daemon's bus name right now. Asked only
@@ -130,88 +125,67 @@ impl Client {
     /// client and the daemon are different versions, which deserves a
     /// different message than "not running".
     pub fn daemon_on_bus(&self) -> bool {
+        let Some(session) = &self.live else {
+            return false;
+        };
         zbus::names::BusName::try_from("org.nightlightd.Daemon")
             .ok()
-            .and_then(|name| self.fdo.name_has_owner(name).ok())
+            .and_then(|name| session.bus.name_has_owner(name).ok())
             .unwrap_or(false)
     }
 
     /// The current status, or `None` when the daemon cannot be reached.
     pub fn status(&self) -> Option<Status> {
-        self.proxy.get_status().ok()
+        self.live.as_ref()?.proxy.get_status().ok()
     }
 
     /// Pins a manual temperature and turns the filter on. Errors (a stopped
     /// daemon) are swallowed — dragging the slider must never crash the panel.
     pub fn set_temperature(&self, kelvin: u32) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_temperature(kelvin);
+        self.send(|proxy| proxy.set_temperature(kelvin));
     }
 
     /// Hands control back to the sun. The daemon's "auto" clears the override
     /// and turns the filter on itself, so one call carries the whole intent.
     pub fn follow_the_sun(&self) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_mode("auto");
+        self.send(|proxy| proxy.set_mode("auto"));
     }
 
     /// Turns the filter on or off explicitly, so a button does what its label
     /// showed rather than blindly flipping whatever the daemon holds. Errors
     /// swallowed, like every other write here.
     pub fn set_enabled(&self, enabled: bool) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_enabled(enabled);
+        self.send(|proxy| proxy.set_enabled(enabled));
     }
 
     /// Sets the daytime target temperature (the top of the curve); persisted by
     /// the daemon. Errors swallowed.
     pub fn set_day_temp(&self, kelvin: u32) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_day_temp(kelvin);
+        self.send(|proxy| proxy.set_day_temp(kelvin));
     }
 
     /// Sets the night target temperature (the bottom of the curve); persisted by
     /// the daemon. Errors swallowed.
     pub fn set_night_temp(&self, kelvin: u32) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_night_temp(kelvin);
+        self.send(|proxy| proxy.set_night_temp(kelvin));
     }
 
     /// Sets the gamma exponent; the daemon clamps and persists it. Errors
     /// swallowed.
     pub fn set_gamma(&self, gamma: f64) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_gamma(gamma);
+        self.send(|proxy| proxy.set_gamma(gamma));
     }
 
     /// Sets the brightness bounds; the daemon clamps and persists them. Errors
     /// swallowed.
     pub fn set_brightness(&self, day: f64, night: f64) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_brightness(day, night);
+        self.send(|proxy| proxy.set_brightness(day, night));
     }
 
     /// Turns the fade walk (#44) on or off; the daemon persists it. Errors
     /// swallowed.
     pub fn set_fade(&self, fade: bool) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_fade(fade);
+        self.send(|proxy| proxy.set_fade(fade));
     }
 
     /// Every screen the ramp is being written to, as `(crtc, ramp size)`.
@@ -219,51 +193,51 @@ impl Client {
     /// has not applied anything yet — two different silences, and the tab
     /// says which one it is looking at.
     pub fn outputs(&self) -> Option<Vec<(u32, u16)>> {
-        self.proxy.get_outputs().ok()
+        self.live.as_ref()?.proxy.get_outputs().ok()
     }
 
     /// Pins a location by hand, overriding whatever the timezone resolved to.
     /// The daemon persists it. Errors swallowed.
     pub fn set_location(&self, latitude: f64, longitude: f64) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_location(latitude, longitude);
+        self.send(|proxy| proxy.set_location(latitude, longitude));
     }
 
     /// Drops a hand-set location and lets the timezone answer again — the
     /// road back from a pin dropped in the wrong ocean.
     pub fn clear_location(&self) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.clear_location();
+        self.send(|proxy| proxy.clear_location());
     }
 
     /// Sets the transition band (#45); the daemon carries the pair verbatim
     /// and persists it. Errors swallowed.
     pub fn set_band(&self, day: f64, night: f64) {
-        if self.muted {
-            return;
-        }
-        let _ = self.proxy.set_transition_band(day, night);
+        self.send(|proxy| proxy.set_transition_band(day, night));
     }
 
     /// Sets the morning's band and the evening's in one request (#47), as a
     /// dragged ramp proposes them. Ignored on failure, like every write.
     pub fn set_bands(&self, bands: Bands) {
-        let _ = self.proxy.set_transition_bands(
-            bands.dawn.day_elevation,
-            bands.dawn.night_elevation,
-            bands.dusk.day_elevation,
-            bands.dusk.night_elevation,
-        );
+        self.send(|proxy| {
+            proxy.set_transition_bands(
+                bands.dawn.day_elevation,
+                bands.dawn.night_elevation,
+                bands.dusk.day_elevation,
+                bands.dusk.night_elevation,
+            )
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_band_edits_run_without_a_daemon() {
+        let client = Client::demo();
+        client.set_bands(Bands::default());
+        client.send(|_| panic!("demo dispatched a live request"));
+    }
 
     /// Must match the daemon's `cli/src/status.rs` (and the tray's copy) — see
     /// the pin there. A mismatch makes get_status fail while writes still

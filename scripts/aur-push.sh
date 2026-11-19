@@ -13,7 +13,6 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pkgbuild="$repo/dist/aur/PKGBUILD"
-work="${TMPDIR:-/tmp}/aur-nightlightd"
 
 for tool in git makepkg curl sha256sum; do
     command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
@@ -21,7 +20,10 @@ done
 
 pkgver="$(sed -n 's/^pkgver=//p' "$pkgbuild")"
 declared="$(sed -n "s/^sha256sums=('\\(.*\\)')/\\1/p" "$pkgbuild")"
-[ -n "$pkgver" ] && [ -n "$declared" ] || { echo "cannot read pkgver/sha256sums" >&2; exit 1; }
+if [[ -z $pkgver || -z $declared ]]; then
+    echo "cannot read pkgver/sha256sums" >&2
+    exit 1
+fi
 echo "PKGBUILD says $pkgver"
 
 # The checksum is the one thing here that fails silently and late: a bumped
@@ -39,16 +41,16 @@ if [ "$actual" != "$declared" ]; then
 fi
 echo "checksum matches"
 
-rm -rf "$work"
-if ! git clone --quiet "ssh://aur@aur.archlinux.org/nightlightd.git" "$work" 2>"$work.err"; then
-    sed 's/^/  /' "$work.err" >&2
-    rm -f "$work.err"
+stage="$(mktemp -d)"
+trap 'rm -rf -- "$stage"' EXIT
+work="$stage/checkout"
+if ! git clone --quiet "ssh://aur@aur.archlinux.org/nightlightd.git" "$work" 2>"$stage/clone.err"; then
+    sed 's/^/  /' "$stage/clone.err" >&2
     echo >&2
     echo "The AUR is unreachable. The release is not finished — run this again" >&2
     echo "when it is back, and do not close the checklist in the meantime." >&2
     exit 1
 fi
-rm -f "$work.err"
 
 cp "$pkgbuild" "$work/PKGBUILD"
 ( cd "$work" && makepkg --printsrcinfo > .SRCINFO )

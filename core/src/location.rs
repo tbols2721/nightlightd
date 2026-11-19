@@ -456,8 +456,12 @@ this line is malformed and has no tabs
 
     #[test]
     fn each_directory_is_searched_in_full_before_the_next() {
-        let base =
-            std::env::temp_dir().join(format!("nightlightd-zoneinfo-{}", std::process::id()));
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let base = fixture.path();
         let (first, second) = (base.join("first"), base.join("second"));
         std::fs::create_dir_all(&first).unwrap();
         std::fs::create_dir_all(&second).unwrap();
@@ -469,7 +473,6 @@ this line is malformed and has no tabs
         // preferred file; a directory that does not exist is passed over.
         let found = read_first(&[missing.clone(), first, second], &names);
         let none = read_first(&[missing], &names);
-        std::fs::remove_dir_all(&base).unwrap();
         assert_eq!(found.as_deref(), Some("first's table"));
         assert_eq!(none, None);
     }

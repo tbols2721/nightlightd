@@ -12,7 +12,7 @@
 # So the isolation is the point of this script, and it is built from four
 # things rather than one:
 #
-#   a nested X server        the click lands on :9, not on your screen
+#   a nested X server        Xephyr allocates a display and requires a cookie
 #   a private D-Bus session  our daemon, our tray, nobody else's
 #   a private HOME           set before dbus-run-session, because services
 #                            D-Bus activates (xfconfd) inherit the *bus's*
@@ -26,26 +26,28 @@
 # XDG variables still writes to $HOME/.config, and one that does is exactly
 # the kind of thing this is defending against.
 #
-# Needs: Xephyr, xfce4-panel, xfce4-screenshooter, xdotool, python3 (Pillow).
+# Needs: Xephyr, xauth, mcookie, xfce4-panel, xfce4-screenshooter, xdotool, python3 (Pillow).
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$repo/docs/screenshots"
 work="$(mktemp -d)"
-display=":9"
 # Small enough that the menu fills the frame, tall enough to hold it above a
 # bottom panel.
 geometry="520x360"
 
-for tool in Xephyr xfce4-panel xfce4-screenshooter xdotool python3; do
-    command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
-done
-
 cleanup() {
-    [ -n "${xephyr_pid:-}" ] && kill "$xephyr_pid" 2>/dev/null || true
+    if [[ -n ${xephyr_pid:-} ]]; then
+        kill "$xephyr_pid" 2>/dev/null || true
+        wait "$xephyr_pid" 2>/dev/null || true
+    fi
     rm -rf "$work"
 }
 trap cleanup EXIT
+
+for tool in Xephyr xauth mcookie xfce4-panel xfce4-screenshooter xdotool python3; do
+    command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
+done
 
 echo "fingerprinting the real xfce4 config…"
 find "$HOME/.config/xfce4" -type f -name '*.xml' -exec sha256sum {} \; \
@@ -89,10 +91,30 @@ PANEL
 cargo build --release -p nightlightd -p nightlight-tray \
     --manifest-path "$repo/Cargo.toml" -q
 
-echo "starting a $geometry X server on $display…"
-Xephyr "$display" -screen "$geometry" -br -ac -noreset > "$work/xephyr.log" 2>&1 &
+# Xephyr reads the cookie from its server file. Clients need a separate
+# entry keyed to the display number that Xephyr allocates at startup.
+cookie="$(mcookie)"
+server_auth="$work/server.auth"
+client_auth="$work/client.auth"
+touch "$server_auth" "$client_auth"
+printf 'add :0 MIT-MAGIC-COOKIE-1 %s\n' "$cookie" | xauth -q -f "$server_auth"
+: > "$work/display"
+Xephyr -displayfd 3 -auth "$server_auth" -nolisten tcp -screen "$geometry" -br -noreset \
+    3>"$work/display" >"$work/xephyr.log" 2>&1 &
 xephyr_pid=$!
-sleep 3
+for ((attempt=0; attempt<100; attempt++)); do
+    if read -r number < "$work/display" && [[ $number =~ ^[0-9]+$ ]]; then break; fi
+    kill -0 "$xephyr_pid" 2>/dev/null || break
+    sleep 0.1
+done
+if ! read -r number < "$work/display" || ! [[ $number =~ ^[0-9]+$ ]] || ! kill -0 "$xephyr_pid" 2>/dev/null; then
+    cat "$work/xephyr.log" >&2
+    echo "Xephyr did not report a ready display" >&2
+    exit 1
+fi
+display=":$number"
+printf 'add %s MIT-MAGIC-COOKIE-1 %s\n' "$display" "$cookie" | xauth -q -f "$client_auth"
+unset cookie
 
 cat > "$work/session.sh" <<SESSION
 #!/usr/bin/env bash
@@ -136,7 +158,7 @@ env -i HOME="$work/home" \
     XDG_CACHE_HOME="$work/home/.cache" \
     XDG_DATA_HOME="$work/home/.local/share" \
     XDG_STATE_HOME="$work/home/.local/state" \
-    PATH=/usr/bin:/bin DISPLAY="$display" \
+    PATH=/usr/bin:/bin DISPLAY="$display" XAUTHORITY="$client_auth" \
     dbus-run-session -- "$work/session.sh" 2>&1 | grep -E '^\s+\[|moved at'
 
 [ -f "$work/frame.png" ] || { echo "no frame was captured" >&2; exit 1; }

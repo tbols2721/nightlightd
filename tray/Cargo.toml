@@ -22,3 +22,6 @@ nightlightd-core = { path = "../core" }
 ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
 serde = { version = "1.0.228", features = ["derive"] }
 zbus = "5.17.0"
+
+[dev-dependencies]
+tempfile = "3.27"

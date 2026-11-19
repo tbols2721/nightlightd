@@ -11,6 +11,7 @@ license.workspace = true
 description = "Zero-config screen colour temperature daemon for X11"
 
 [dependencies]
+tempfile = "3.27"
 # Pure logic (colour, sun, timezone). Used from #11 onward.
 nightlightd-core = { path = "../core" }
 # X11 / XRandR access. Pure-Rust bindings — no C libxcb build dependency. The

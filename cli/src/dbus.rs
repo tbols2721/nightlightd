@@ -30,7 +30,8 @@ struct Daemon {
     waker: Waker,
 }
 
-#[interface(name = "org.nightlightd.Daemon")]
+// Persist settings in request order so an older snapshot cannot replace a later save.
+#[interface(name = "org.nightlightd.Daemon", spawn = false)]
 impl Daemon {
     /// Pin a manual temperature (kelvin) and turn the filter on. Held to what
     /// the table can render, so `GetStatus` never reports a number the screen

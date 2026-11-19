@@ -5,7 +5,9 @@
 //! back silently; a malformed one prints a clear error and then falls back too.
 //! Lives in `cli`, not `core`, so `core` stays dependency-free.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use nightlightd_core::mode::Mode;
 use nightlightd_core::transition::{Band, Bands};
@@ -210,13 +212,27 @@ pub fn save(config: &Config) -> std::io::Result<()> {
     let Some(path) = config_path() else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    save_to(&path, config)
+}
+
+fn save_to(path: &Path, config: &Config) -> std::io::Result<()> {
+    let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    let mode = match path.metadata() {
+        Ok(meta) => meta.permissions().mode() & 0o600,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0o600,
+        Err(err) => return Err(err),
+    };
     let text = toml::to_string(config).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path)
+    let mut tmp = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(mode))
+        .tempfile_in(parent)?;
+    tmp.write_all(text.as_bytes())?;
+    tmp.persist(path)?;
+    Ok(())
 }
 
 /// `$XDG_CONFIG_HOME/nightlightd/config.toml`, or `~/.config/...` as a fallback.
@@ -227,6 +243,31 @@ fn config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_keeps_coordinates_private_and_respects_stricter_modes() {
+        let dir = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let parent = dir.path().join("nightlightd");
+        let path = parent.join("config.toml");
+        let config = Config {
+            latitude: Some(45.0),
+            longitude: Some(12.0),
+            ..Config::default()
+        };
+        save_to(&path, &config).unwrap();
+        assert_eq!(parent.metadata().unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o077, 0);
+        for (before, after) in [(0o644, 0o600), (0o400, 0o400)] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(before)).unwrap();
+            save_to(&path, &config).unwrap();
+            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, after);
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
+        }
+    }
 
     #[test]
     fn empty_config_is_all_defaults() {

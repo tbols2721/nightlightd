@@ -629,7 +629,12 @@ mod tests {
     /// missing one on a machine that has the panel.
     #[test]
     fn a_companion_binary_is_found_only_where_it_actually_is() {
-        let root = std::env::temp_dir().join("nightlightd-located-test");
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = fixture.path();
         let (present, absent) = (root.join("bin"), root.join("empty"));
         std::fs::create_dir_all(&present).expect("temp dir");
         std::fs::create_dir_all(&absent).expect("temp dir");
@@ -649,8 +654,6 @@ mod tests {
         // Earlier directories win, which is what puts a sibling ahead of PATH.
         let dirs = [root.join("nowhere"), present, root.join("later")];
         assert!(first_holding(dirs.into_iter(), PANEL).is_some_and(|p| p.ends_with(PANEL)));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     fn following_at(elevation: f64) -> Status {
